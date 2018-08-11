@@ -317,11 +317,63 @@ func (a *AuthWithRoles) UpsertNode(s services.Server) error {
 	return a.authServer.UpsertNode(s)
 }
 
+// filterNodes filters nodes based off the role of the logged in user.
+func (a *AuthWithRoles) filterNodes(nodes []services.Server) ([]services.Server, error) {
+	// Fetch services.RoleSet for the identity of the logged in user.
+	roles, err := services.FetchRoles(a.user.GetRoles(), a.authServer, a.user.GetTraits())
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+
+	// Extract all unique allowed logins across all roles.
+	allowedLogins := make(map[string]bool)
+	for _, role := range roles {
+		for _, login := range role.GetLogins(services.Allow) {
+			allowedLogins[login] = true
+		}
+	}
+
+	// Loop over all nodes and check if the caller has access.
+	filteredNodes := make([]services.Server, 0, len(nodes))
+NextNode:
+	for _, node := range nodes {
+		for login, _ := range allowedLogins {
+			err := roles.CheckAccessToServer(login, node)
+			if err == nil {
+				filteredNodes = append(filteredNodes, node)
+				continue NextNode
+			}
+		}
+	}
+
+	return filteredNodes, nil
+}
+
 func (a *AuthWithRoles) GetNodes(namespace string, opts ...services.MarshalOption) ([]services.Server, error) {
 	if err := a.action(namespace, services.KindNode, services.VerbList); err != nil {
 		return nil, trace.Wrap(err)
 	}
-	return a.authServer.GetNodes(namespace, opts...)
+
+	// Fetch full list of nodes in the backend.
+	startFetch := time.Now()
+	nodes, err := a.authServer.GetNodes(namespace, opts...)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	elapsedFetch := time.Since(startFetch)
+
+	// Filter nodes to return the ones for the connected identity.
+	startFilter := time.Now()
+	filteredNodes, err := a.filterNodes(nodes)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	elapsedFilter := time.Since(startFilter)
+
+	log.Debugf("GetServers(%v->%v) in %v for %v, %v to fetch, %v to filter.",
+		len(nodes), len(filteredNodes), a.user.GetName(), elapsedFetch+elapsedFilter, elapsedFetch, elapsedFilter)
+
+	return filteredNodes, nil
 }
 
 func (a *AuthWithRoles) UpsertAuthServer(s services.Server) error {

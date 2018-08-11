@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"testing"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 	"github.com/gravitational/teleport/lib/utils"
 
 	"github.com/gravitational/trace"
+	"github.com/pborman/uuid"
 	. "gopkg.in/check.v1"
 )
 
@@ -1329,4 +1331,66 @@ func (s *RoleSuite) TestCheckAndSetDefaults(c *C) {
 		}
 	}
 
+}
+
+func BenchmarkCheckAccessToServer(b *testing.B) {
+	servers := make([]*ServerV2, 0, 4000)
+
+	// Create 4,000 servers with random IDs.
+	for i := 0; i < 4000; i++ {
+		hostname := uuid.NewUUID().String()
+		servers = append(servers, &ServerV2{
+			Kind:    KindNode,
+			Version: V2,
+			Metadata: Metadata{
+				Name:      hostname,
+				Namespace: defaults.Namespace,
+			},
+			Spec: ServerSpecV2{
+				Addr:     "127.0.0.1:3022",
+				Hostname: hostname,
+			},
+		})
+	}
+
+	// Create RoleSet with five roles: one admin role and four generic roles
+	// that have five logins each and only have access to the foo:bar label.
+	var set RoleSet
+	set = append(set, NewAdminRole())
+	for i := 0; i < 4; i++ {
+		set = append(set, &RoleV3{
+			Kind:    KindRole,
+			Version: V3,
+			Metadata: Metadata{
+				Name:      strconv.Itoa(i),
+				Namespace: defaults.Namespace,
+			},
+			Spec: RoleSpecV3{
+				Allow: RoleConditions{
+					Logins:     []string{"admin", "one", "two", "three", "four"},
+					NodeLabels: Labels{"a": []string{"b"}},
+				},
+			},
+		})
+	}
+
+	// Initialization is complete, start the benchmark timer.
+	b.ResetTimer()
+
+	// Build a map of all allowed logins.
+	allowLogins := map[string]bool{}
+	for _, role := range set {
+		for _, login := range role.GetLogins(Allow) {
+			allowLogins[login] = true
+		}
+	}
+
+	// Check access to all 4,000 nodes.
+	for n := 0; n < b.N; n++ {
+		for i := 0; i < 4000; i++ {
+			for login, _ := range allowLogins {
+				set.CheckAccessToServer(login, servers[i])
+			}
+		}
+	}
 }
