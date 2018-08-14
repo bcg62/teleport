@@ -85,6 +85,19 @@ func (a *AuthWithRoles) hasBuiltinRole(name string) bool {
 	return true
 }
 
+// hasRemoteBuiltinRole checks the type of the role set returned and the name.
+// Returns true if role set is remote builtin and the name matches.
+func (a *AuthWithRoles) hasRemoteBuiltinRole(name string) bool {
+	if _, ok := a.checker.(RemoteBuiltinRoleSet); !ok {
+		return false
+	}
+	if !a.checker.HasRole(name) {
+		return false
+	}
+
+	return true
+}
+
 // AuthenticateWebUser authenticates web user, creates and  returns web session
 // in case if authentication is successfull
 func (a *AuthWithRoles) AuthenticateWebUser(req AuthenticateUserRequest) (services.WebSession, error) {
@@ -319,6 +332,15 @@ func (a *AuthWithRoles) UpsertNode(s services.Server) error {
 
 // filterNodes filters nodes based off the role of the logged in user.
 func (a *AuthWithRoles) filterNodes(nodes []services.Server) ([]services.Server, error) {
+	// DELETE IN 3.1.0
+	// For certain built-in roles, continue to allow access and return the full
+	// set of nodes to not break existing clusters during migration.
+	if a.hasBuiltinRole(string(teleport.RoleAdmin)) ||
+		a.hasBuiltinRole(string(teleport.RoleProxy)) ||
+		a.hasRemoteBuiltinRole(string(teleport.RoleRemoteProxy)) {
+		return nodes, nil
+	}
+
 	// Fetch services.RoleSet for the identity of the logged in user.
 	roles, err := services.FetchRoles(a.user.GetRoles(), a.authServer, a.user.GetTraits())
 	if err != nil {
