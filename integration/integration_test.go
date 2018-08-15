@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net"
 	"net/http/httptest"
 	"net/url"
 	"os"
@@ -216,8 +217,20 @@ func (s *IntSuite) TestAuditOn(c *check.C) {
 		t := s.newTeleportWithConfig(makeConfig())
 		defer t.Stop(true)
 
+		// Start a node.
 		nodeSSHPort := s.getPorts(1)[0]
-		nodeProcess, err := t.StartNode("node", nodeSSHPort)
+		nodeConfig := func() *service.Config {
+			tconf := service.MakeDefaultConfig()
+
+			tconf.HostUUID = "node"
+			tconf.Hostname = "node"
+
+			tconf.SSH.Enabled = true
+			tconf.SSH.Addr.Addr = net.JoinHostPort(t.Hostname, fmt.Sprintf("%v", nodeSSHPort))
+
+			return tconf
+		}
+		nodeProcess, err := t.StartNode(nodeConfig())
 		c.Assert(err, check.IsNil)
 
 		// get access to a authClient for the cluster
@@ -2906,6 +2919,103 @@ func (s *IntSuite) TestWindowChange(c *check.C) {
 
 	// Close the session.
 	personA.Type("\aexit\r\n\a")
+}
+
+func (s *IntSuite) TestList(c *check.C) {
+	// Create and start a Teleport cluster with auth, proxy, and node.
+	makeConfig := func() (*check.C, []string, []*InstanceSecrets, *service.Config) {
+		clusterConfig, err := services.NewClusterConfig(services.ClusterConfigSpecV3{
+			SessionRecording: services.RecordOff,
+		})
+		c.Assert(err, check.IsNil)
+
+		tconf := service.MakeDefaultConfig()
+		tconf.Hostname = "server-01"
+		tconf.Auth.Enabled = true
+		tconf.Auth.ClusterConfig = clusterConfig
+		tconf.Proxy.Enabled = true
+		tconf.Proxy.DisableWebService = true
+		tconf.Proxy.DisableWebInterface = true
+		tconf.SSH.Enabled = true
+		tconf.SSH.Labels = map[string]string{
+			"role": "worker",
+		}
+
+		return c, nil, nil, tconf
+	}
+	t := s.newTeleportWithConfig(makeConfig())
+	defer t.Stop(true)
+
+	// Create and start a Teleport node.
+	nodeSSHPort := s.getPorts(1)[0]
+	nodeConfig := func() *service.Config {
+		tconf := service.MakeDefaultConfig()
+		tconf.Hostname = "server-02"
+		tconf.SSH.Enabled = true
+		tconf.SSH.Addr.Addr = net.JoinHostPort(t.Hostname, fmt.Sprintf("%v", nodeSSHPort))
+		tconf.SSH.Labels = map[string]string{
+			"role": "database",
+		}
+
+		return tconf
+	}
+	_, err := t.StartNode(nodeConfig())
+	c.Assert(err, check.IsNil)
+
+	// Get an auth client to the cluster.
+	clt := t.GetSiteAPI(Site)
+	c.Assert(clt, check.NotNil)
+
+	// Wait 10 seconds for both nodes to show up to make sure they both have
+	// registered themselves.
+	waitForNodes := func(clt auth.ClientI, count int) error {
+		tickCh := time.Tick(500 * time.Millisecond)
+		stopCh := time.After(10 * time.Second)
+		for {
+			select {
+			case <-tickCh:
+				nodesInCluster, err := clt.GetNodes(defaults.Namespace, services.SkipValidation())
+				if err != nil && !trace.IsNotFound(err) {
+					return trace.Wrap(err)
+				}
+				if got, want := len(nodesInCluster), count; got == want {
+					return nil
+				}
+			case <-stopCh:
+				return trace.BadParameter("waited 10s, did find %v nodes", count)
+			}
+		}
+	}
+	err = waitForNodes(clt, 2)
+	c.Assert(err, check.IsNil)
+
+	role, err := services.NewRole("role-name", services.RoleSpecV3{
+		Allow: services.RoleConditions{
+			Logins:     []string{"foo"},
+			NodeLabels: services.Labels{"role": []string{"worker"}},
+		},
+	})
+	c.Assert(err, check.IsNil)
+
+	err = SetupUser(t.Process, "foo", []services.Role{role})
+	c.Assert(err, check.IsNil)
+
+	// capture credentials before reload started to simulate old client
+	initialCreds, err := GenerateUserCreds(t.Process, "foo")
+	c.Assert(err, check.IsNil)
+
+	cfg := ClientConfig{
+		Login: "foo",
+		//Cluster: Site,
+		Host: "127.0.0.1",
+		Port: t.GetPortSSHInt(),
+	}
+	userClt, err := t.NewClientWithCreds(cfg, *initialCreds)
+	c.Assert(err, check.IsNil)
+
+	nodes, err := userClt.ListNodes(context.Background())
+	c.Assert(err, check.IsNil)
+	fmt.Printf("--> nodes: %v\n", nodes)
 }
 
 // runCommand is a shortcut for running SSH command, it creates a client

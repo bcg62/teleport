@@ -1798,6 +1798,7 @@ func lineFromConsole() (string, error) {
 // ParseLabelSpec parses a string like 'name=value,"long name"="quoted value"` into a map like
 // { "name" -> "value", "long name" -> "quoted value" }
 func ParseLabelSpec(spec string) (map[string]string, error) {
+	fmt.Printf("--> ParseLabelSpec: %v.\n", spec)
 	tokens := []string{}
 	var openQuotes = false
 	var tokenStart, assignCount int
